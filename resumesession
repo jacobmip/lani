@@ -1,0 +1,1 @@
+"Pull the lani repo from github.com/jacobmip/lani and deploy it to Vercel. It's a voice AI assistant. I need to add my Anthropic API key as an environment variable. Walk me through the full deploy."
