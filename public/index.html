@@ -1,0 +1,325 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Lani</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      background: #0a0a0a;
+      color: #fff;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      min-height: 100vh;
+      padding: 24px;
+    }
+
+    h1 {
+      font-size: 1.2rem;
+      font-weight: 400;
+      letter-spacing: 0.3em;
+      text-transform: uppercase;
+      color: #888;
+      margin-bottom: 48px;
+    }
+
+    #orb {
+      width: 160px;
+      height: 160px;
+      border-radius: 50%;
+      background: radial-gradient(circle at 40% 40%, #1a6fff, #0033cc);
+      box-shadow: 0 0 40px rgba(26, 111, 255, 0.4);
+      cursor: pointer;
+      transition: transform 0.1s, box-shadow 0.3s;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      user-select: none;
+      -webkit-tap-highlight-color: transparent;
+    }
+
+    #orb:active { transform: scale(0.96); }
+
+    #orb.listening {
+      animation: pulse 1.2s ease-in-out infinite;
+      box-shadow: 0 0 60px rgba(26, 111, 255, 0.7);
+    }
+
+    #orb.thinking {
+      background: radial-gradient(circle at 40% 40%, #ff6a1a, #cc4400);
+      box-shadow: 0 0 40px rgba(255, 106, 26, 0.5);
+    }
+
+    #orb.speaking {
+      animation: pulse-speak 0.8s ease-in-out infinite;
+      box-shadow: 0 0 60px rgba(26, 111, 255, 0.9);
+    }
+
+    @keyframes pulse {
+      0%, 100% { transform: scale(1); }
+      50% { transform: scale(1.06); }
+    }
+
+    @keyframes pulse-speak {
+      0%, 100% { transform: scale(1); }
+      50% { transform: scale(1.04); }
+    }
+
+    #mic-icon {
+      width: 48px;
+      height: 48px;
+      fill: rgba(255,255,255,0.9);
+    }
+
+    #status {
+      margin-top: 32px;
+      font-size: 0.9rem;
+      color: #666;
+      letter-spacing: 0.05em;
+      min-height: 24px;
+      text-align: center;
+    }
+
+    #transcript {
+      margin-top: 24px;
+      max-width: 480px;
+      width: 100%;
+      font-size: 1rem;
+      color: #ccc;
+      text-align: center;
+      line-height: 1.6;
+      min-height: 48px;
+    }
+
+    #response {
+      margin-top: 16px;
+      max-width: 480px;
+      width: 100%;
+      font-size: 1.05rem;
+      color: #fff;
+      text-align: center;
+      line-height: 1.7;
+      min-height: 48px;
+    }
+
+    #history {
+      margin-top: 40px;
+      max-width: 480px;
+      width: 100%;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      max-height: 300px;
+      overflow-y: auto;
+    }
+
+    .msg {
+      padding: 10px 14px;
+      border-radius: 12px;
+      font-size: 0.88rem;
+      line-height: 1.5;
+    }
+
+    .msg.user {
+      background: #1a1a2e;
+      color: #aaa;
+      align-self: flex-end;
+      max-width: 85%;
+    }
+
+    .msg.assistant {
+      background: #0d1f3c;
+      color: #ddd;
+      align-self: flex-start;
+      max-width: 85%;
+    }
+
+    #clear-btn {
+      margin-top: 24px;
+      background: none;
+      border: 1px solid #333;
+      color: #555;
+      padding: 6px 16px;
+      border-radius: 20px;
+      font-size: 0.8rem;
+      cursor: pointer;
+      letter-spacing: 0.05em;
+    }
+
+    #clear-btn:hover { border-color: #555; color: #888; }
+  </style>
+</head>
+<body>
+  <h1>Lani</h1>
+
+  <div id="orb" onclick="handleOrb()">
+    <svg id="mic-icon" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+      <path d="M12 1a4 4 0 0 1 4 4v6a4 4 0 0 1-8 0V5a4 4 0 0 1 4-4zm-6.5 9a.5.5 0 0 1 .5.5 6 6 0 0 0 12 0 .5.5 0 0 1 1 0 7 7 0 0 1-6.5 6.93V19h2.5a.5.5 0 0 1 0 1h-6a.5.5 0 0 1 0-1H11v-1.57A7 7 0 0 1 4.5 10.5a.5.5 0 0 1 .5-.5z"/>
+    </svg>
+  </div>
+
+  <div id="status">Tap to speak</div>
+  <div id="transcript"></div>
+  <div id="response"></div>
+
+  <div id="history"></div>
+  <button id="clear-btn" onclick="clearHistory()">Clear conversation</button>
+
+  <script>
+    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+    const orb = document.getElementById('orb');
+    const statusEl = document.getElementById('status');
+    const transcriptEl = document.getElementById('transcript');
+    const responseEl = document.getElementById('response');
+    const historyEl = document.getElementById('history');
+
+    let recognition;
+    let isListening = false;
+    let isSpeaking = false;
+    let conversationHistory = [];
+
+    if (!SpeechRecognition) {
+      statusEl.textContent = 'Voice not supported. Use Chrome or Safari.';
+      orb.style.opacity = '0.4';
+      orb.style.cursor = 'default';
+    } else {
+      recognition = new SpeechRecognition();
+      recognition.continuous = false;
+      recognition.interimResults = false;
+      recognition.lang = 'en-US';
+
+      recognition.onresult = (e) => {
+        const text = e.results[0][0].transcript;
+        transcriptEl.textContent = text;
+        stopListening();
+        sendMessage(text);
+      };
+
+      recognition.onerror = () => {
+        stopListening();
+        statusEl.textContent = 'Didn\'t catch that. Tap to try again.';
+      };
+
+      recognition.onend = () => {
+        if (isListening) stopListening();
+      };
+    }
+
+    function handleOrb() {
+      if (isSpeaking) {
+        window.speechSynthesis.cancel();
+        isSpeaking = false;
+        orb.className = '';
+        statusEl.textContent = 'Tap to speak';
+        return;
+      }
+      if (isListening) {
+        recognition.stop();
+        stopListening();
+      } else {
+        startListening();
+      }
+    }
+
+    function startListening() {
+      isListening = true;
+      orb.className = 'listening';
+      statusEl.textContent = 'Listening...';
+      transcriptEl.textContent = '';
+      responseEl.textContent = '';
+      recognition.start();
+    }
+
+    function stopListening() {
+      isListening = false;
+      orb.className = '';
+    }
+
+    async function sendMessage(text) {
+      orb.className = 'thinking';
+      statusEl.textContent = 'Thinking...';
+
+      try {
+        const res = await fetch('/api/chat', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ message: text, history: conversationHistory }),
+        });
+
+        const data = await res.json();
+        const reply = data.reply || 'Sorry, something went wrong.';
+
+        conversationHistory.push({ role: 'user', content: text });
+        conversationHistory.push({ role: 'assistant', content: reply });
+
+        if (conversationHistory.length > 20) {
+          conversationHistory = conversationHistory.slice(-20);
+        }
+
+        responseEl.textContent = reply;
+        addToHistory(text, reply);
+        speak(reply);
+      } catch {
+        orb.className = '';
+        statusEl.textContent = 'Error. Tap to try again.';
+      }
+    }
+
+    function speak(text) {
+      window.speechSynthesis.cancel();
+      const utterance = new SpeechSynthesisUtterance(text);
+      utterance.rate = 1.0;
+      utterance.pitch = 1.0;
+
+      const voices = window.speechSynthesis.getVoices();
+      const preferred = voices.find(v =>
+        v.name.includes('Samantha') || v.name.includes('Daniel') || v.name.includes('Google US English')
+      );
+      if (preferred) utterance.voice = preferred;
+
+      utterance.onstart = () => {
+        isSpeaking = true;
+        orb.className = 'speaking';
+        statusEl.textContent = 'Speaking... (tap to stop)';
+      };
+
+      utterance.onend = () => {
+        isSpeaking = false;
+        orb.className = '';
+        statusEl.textContent = 'Tap to speak';
+      };
+
+      window.speechSynthesis.speak(utterance);
+    }
+
+    function addToHistory(userText, assistantText) {
+      const userMsg = document.createElement('div');
+      userMsg.className = 'msg user';
+      userMsg.textContent = userText;
+
+      const assistantMsg = document.createElement('div');
+      assistantMsg.className = 'msg assistant';
+      assistantMsg.textContent = assistantText;
+
+      historyEl.appendChild(userMsg);
+      historyEl.appendChild(assistantMsg);
+      historyEl.scrollTop = historyEl.scrollHeight;
+    }
+
+    function clearHistory() {
+      conversationHistory = [];
+      historyEl.innerHTML = '';
+      transcriptEl.textContent = '';
+      responseEl.textContent = '';
+      statusEl.textContent = 'Tap to speak';
+    }
+
+    window.speechSynthesis.onvoiceschanged = () => {};
+  </script>
+</body>
+</html>

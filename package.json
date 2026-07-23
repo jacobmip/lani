@@ -1,0 +1,11 @@
+{
+  "name": "jarvis",
+  "version": "1.0.0",
+  "description": "Jake's voice AI executive assistant",
+  "scripts": {
+    "dev": "vercel dev"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.39.0"
+  }
+}
