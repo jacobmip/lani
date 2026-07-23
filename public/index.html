@@ -139,8 +139,16 @@
       max-width: 85%;
     }
 
-    #clear-btn {
+    #controls {
       margin-top: 24px;
+      display: flex;
+      gap: 12px;
+      align-items: center;
+      flex-wrap: wrap;
+      justify-content: center;
+    }
+
+    .ctl {
       background: none;
       border: 1px solid #333;
       color: #555;
@@ -151,7 +159,17 @@
       letter-spacing: 0.05em;
     }
 
-    #clear-btn:hover { border-color: #555; color: #888; }
+    .ctl:hover { border-color: #555; color: #888; }
+
+    #voice-select {
+      background: #111;
+      border: 1px solid #333;
+      color: #777;
+      padding: 6px 10px;
+      border-radius: 20px;
+      font-size: 0.8rem;
+      max-width: 220px;
+    }
   </style>
 </head>
 <body>
@@ -163,84 +181,197 @@
     </svg>
   </div>
 
-  <div id="status">Tap to speak</div>
+  <div id="status">Tap to start talking</div>
   <div id="transcript"></div>
   <div id="response"></div>
 
   <div id="history"></div>
-  <button id="clear-btn" onclick="clearHistory()">Clear conversation</button>
+
+  <div id="controls">
+    <select id="voice-select" onchange="onVoiceChange()" aria-label="Voice"></select>
+    <button class="ctl" onclick="clearHistory()">Clear conversation</button>
+  </div>
 
   <script>
     const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+
     const orb = document.getElementById('orb');
     const statusEl = document.getElementById('status');
     const transcriptEl = document.getElementById('transcript');
     const responseEl = document.getElementById('response');
     const historyEl = document.getElementById('history');
+    const voiceSelect = document.getElementById('voice-select');
 
-    let recognition;
-    let isListening = false;
-    let isSpeaking = false;
+    // 'off'  = conversation not running
+    // 'active' = hands-free loop running (listening -> thinking -> speaking -> listening)
+    let mode = 'off';
+    let phase = 'idle';
+    let recognition = null;
+    let gotResultThisTurn = false;
+    let consecutiveFailures = 0;
+    let speechUnlocked = false;
+    let voices = [];
+    let selectedVoiceURI = localStorage.getItem('lani-voice') || '';
     let conversationHistory = [];
 
+    /* ---------- Voices ----------
+       getVoices() is populated asynchronously. Reading it once on load returns
+       an empty array in most browsers, which is why voice selection silently
+       fell back to the default before. */
+    function loadVoices() {
+      voices = window.speechSynthesis.getVoices().filter(v => v.lang.startsWith('en'));
+      if (!voices.length) return;
+
+      voiceSelect.innerHTML = '';
+      voices.forEach(v => {
+        const opt = document.createElement('option');
+        opt.value = v.voiceURI;
+        opt.textContent = v.name.replace(/\s*\(.*\)\s*/, '');
+        voiceSelect.appendChild(opt);
+      });
+
+      if (!selectedVoiceURI || !voices.some(v => v.voiceURI === selectedVoiceURI)) {
+        const preferred = voices.find(v =>
+          /Samantha|Ava|Allison|Google US English|Daniel/i.test(v.name)
+        );
+        selectedVoiceURI = (preferred || voices[0]).voiceURI;
+      }
+      voiceSelect.value = selectedVoiceURI;
+    }
+
+    loadVoices();
+    window.speechSynthesis.onvoiceschanged = loadVoices;
+
+    function onVoiceChange() {
+      selectedVoiceURI = voiceSelect.value;
+      localStorage.setItem('lani-voice', selectedVoiceURI);
+      const v = voices.find(x => x.voiceURI === selectedVoiceURI);
+      const demo = new SpeechSynthesisUtterance('Got it.');
+      if (v) demo.voice = v;
+      window.speechSynthesis.cancel();
+      window.speechSynthesis.speak(demo);
+    }
+
+    /* ---------- iOS / Safari unlock ----------
+       Safari refuses speechSynthesis.speak() unless the first call happens
+       inside a real user gesture. Lani's replies arrive after a network round
+       trip, long past the tap, so the very first spoken reply was being
+       dropped. Priming a silent utterance during the tap lifts that block for
+       the rest of the page's life. */
+    function unlockSpeech() {
+      if (speechUnlocked) return;
+      const primer = new SpeechSynthesisUtterance(' ');
+      primer.volume = 0;
+      window.speechSynthesis.speak(primer);
+      speechUnlocked = true;
+    }
+
     if (!SpeechRecognition) {
-      statusEl.textContent = 'Voice not supported. Use Chrome or Safari.';
+      statusEl.textContent = 'Voice input not supported. Use Chrome or Safari.';
       orb.style.opacity = '0.4';
       orb.style.cursor = 'default';
-    } else {
-      recognition = new SpeechRecognition();
-      recognition.continuous = false;
-      recognition.interimResults = false;
-      recognition.lang = 'en-US';
+    }
 
-      recognition.onresult = (e) => {
-        const text = e.results[0][0].transcript;
-        transcriptEl.textContent = text;
-        stopListening();
-        sendMessage(text);
+    function buildRecognition() {
+      const r = new SpeechRecognition();
+      r.continuous = false;
+      r.interimResults = true;
+      r.lang = 'en-US';
+
+      r.onresult = (e) => {
+        let finalText = '';
+        let interim = '';
+        for (let i = e.resultIndex; i < e.results.length; i++) {
+          const chunk = e.results[i][0].transcript;
+          if (e.results[i].isFinal) finalText += chunk;
+          else interim += chunk;
+        }
+
+        if (interim) transcriptEl.textContent = interim;
+
+        if (finalText.trim()) {
+          gotResultThisTurn = true;
+          consecutiveFailures = 0;
+          transcriptEl.textContent = finalText;
+          try { r.stop(); } catch (_) {}
+          sendMessage(finalText.trim());
+        }
       };
 
-      recognition.onerror = () => {
-        stopListening();
-        statusEl.textContent = 'Didn\'t catch that. Tap to try again.';
+      r.onerror = (e) => {
+        if (e.error === 'not-allowed' || e.error === 'service-not-allowed') {
+          endConversation('Microphone blocked. Allow mic access and tap to retry.');
+          return;
+        }
+        // 'no-speech' and 'aborted' are routine — onend handles the restart.
+        if (e.error !== 'no-speech' && e.error !== 'aborted') {
+          consecutiveFailures++;
+        }
       };
 
-      recognition.onend = () => {
-        if (isListening) stopListening();
+      r.onend = () => {
+        // Fires after every phrase, including silence timeouts. If the loop is
+        // still active and no transcript was produced, listen again — this is
+        // what makes it hands-free instead of push-to-talk.
+        if (mode !== 'active' || phase !== 'listening') return;
+
+        if (gotResultThisTurn) return;
+
+        if (consecutiveFailures >= 5) {
+          endConversation('Mic kept failing. Tap to try again.');
+          return;
+        }
+        setTimeout(() => {
+          if (mode === 'active' && phase === 'listening') startListening();
+        }, 250);
       };
+
+      return r;
     }
 
     function handleOrb() {
-      if (isSpeaking) {
-        window.speechSynthesis.cancel();
-        isSpeaking = false;
-        orb.className = '';
-        statusEl.textContent = 'Tap to speak';
-        return;
-      }
-      if (isListening) {
-        recognition.stop();
-        stopListening();
-      } else {
-        startListening();
-      }
+      if (!SpeechRecognition) return;
+      if (mode === 'off') startConversation();
+      else endConversation('Tap to start talking');
+    }
+
+    function startConversation() {
+      unlockSpeech();
+      mode = 'active';
+      consecutiveFailures = 0;
+      responseEl.textContent = '';
+      startListening();
+    }
+
+    function endConversation(message) {
+      mode = 'off';
+      phase = 'idle';
+      try { recognition && recognition.abort(); } catch (_) {}
+      window.speechSynthesis.cancel();
+      orb.className = '';
+      transcriptEl.textContent = '';
+      statusEl.textContent = message || 'Tap to start talking';
     }
 
     function startListening() {
-      isListening = true;
+      phase = 'listening';
+      gotResultThisTurn = false;
       orb.className = 'listening';
-      statusEl.textContent = 'Listening...';
-      transcriptEl.textContent = '';
-      responseEl.textContent = '';
-      recognition.start();
-    }
+      statusEl.textContent = 'Listening... (tap to stop)';
 
-    function stopListening() {
-      isListening = false;
-      orb.className = '';
+      recognition = buildRecognition();
+      try {
+        recognition.start();
+      } catch (_) {
+        // start() throws if the previous instance hasn't fully released yet.
+        setTimeout(() => {
+          if (mode === 'active' && phase === 'listening') startListening();
+        }, 300);
+      }
     }
 
     async function sendMessage(text) {
+      phase = 'thinking';
       orb.className = 'thinking';
       statusEl.textContent = 'Thinking...';
 
@@ -264,37 +395,45 @@
         responseEl.textContent = reply;
         addToHistory(text, reply);
         speak(reply);
-      } catch {
-        orb.className = '';
-        statusEl.textContent = 'Error. Tap to try again.';
+      } catch (_) {
+        speak('Sorry, I could not reach the server.');
       }
     }
 
     function speak(text) {
+      phase = 'speaking';
+      orb.className = 'speaking';
+      statusEl.textContent = 'Speaking... (tap to stop)';
+
       window.speechSynthesis.cancel();
+
       const utterance = new SpeechSynthesisUtterance(text);
       utterance.rate = 1.0;
       utterance.pitch = 1.0;
 
-      const voices = window.speechSynthesis.getVoices();
-      const preferred = voices.find(v =>
-        v.name.includes('Samantha') || v.name.includes('Daniel') || v.name.includes('Google US English')
-      );
-      if (preferred) utterance.voice = preferred;
+      const v = voices.find(x => x.voiceURI === selectedVoiceURI);
+      if (v) utterance.voice = v;
 
-      utterance.onstart = () => {
-        isSpeaking = true;
-        orb.className = 'speaking';
-        statusEl.textContent = 'Speaking... (tap to stop)';
+      // The mic must not be open while Lani is talking, or she transcribes
+      // herself and answers her own sentences. Listening only resumes here.
+      const resume = () => {
+        if (mode !== 'active') return;
+        startListening();
       };
 
-      utterance.onend = () => {
-        isSpeaking = false;
-        orb.className = '';
-        statusEl.textContent = 'Tap to speak';
-      };
+      utterance.onend = resume;
+      utterance.onerror = resume;
 
       window.speechSynthesis.speak(utterance);
+
+      // Safari sometimes drops onend entirely. Without this the loop would
+      // stall in 'speaking' forever, so estimate the duration and recover.
+      const fallbackMs = Math.min(30000, 1500 + text.length * 70);
+      setTimeout(() => {
+        if (mode === 'active' && phase === 'speaking' && !window.speechSynthesis.speaking) {
+          resume();
+        }
+      }, fallbackMs);
     }
 
     function addToHistory(userText, assistantText) {
@@ -316,10 +455,8 @@
       historyEl.innerHTML = '';
       transcriptEl.textContent = '';
       responseEl.textContent = '';
-      statusEl.textContent = 'Tap to speak';
+      if (mode === 'off') statusEl.textContent = 'Tap to start talking';
     }
-
-    window.speechSynthesis.onvoiceschanged = () => {};
   </script>
 </body>
 </html>
